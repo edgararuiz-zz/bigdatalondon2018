@@ -1,4 +1,5 @@
 Data Science with Spark and R
+-----------------------------------
 
 ### Event: Big Data London 2018
 
