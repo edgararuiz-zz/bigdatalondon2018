@@ -1,0 +1,158 @@
+---
+title: "Introducing sparklyr"
+output: html_notebook
+---
+
+## Setup
+
+- Load the libraries 
+```{r, include = FALSE}
+library(sparklyr)
+library(tidyverse)
+
+sc <- spark_connect(master = "local", version = "2.3.0")
+
+if(!file.exists("data"))dir.create("data")
+
+if(!file.exists("data/2008.csv.bz2")){
+  download.file("http://stat-computing.org/dataexpo/2009/2008.csv.bz2", "data/2008.csv.bz2")
+}
+
+file_columns <- read.csv(
+  file = "data/2008.csv.bz2", 
+  nrows = 200, 
+  stringsAsFactors = FALSE
+  ) %>%
+  drop_na() %>%
+  rename_all(tolower) %>%
+  map(~ifelse(class(.x) == "integer", "double", class(.x)))
+
+sp_flights <- spark_read_csv(
+  sc = sc, 
+  name = "flights", 
+  path = "data", 
+  memory = FALSE,
+  columns = file_columns, 
+  infer_schema = FALSE
+)
+```
+
+```{r}
+sp_flights %>%
+  tally()
+```
+
+```{r}
+sp_flights %>%
+  tally() %>%
+  show_query()
+```
+
+```{r}
+cached_flights <- sp_flights %>%
+  filter(!is.na(year)) %>%
+  select(year, month, dayofmonth, crsdeptime, crsarrtime, origin, dest, depdelay, distance, dayofweek, uniquecarrier) %>%
+  compute("cached_flights")
+```
+
+
+```{r}
+spark_airports <- copy_to(sc, nycflights13::airports)
+
+cached_flights %>%
+  left_join(spark_airports, by = c("origin" = "faa"))
+  
+```
+
+```{r}
+cached_flights %>%
+  left_join(spark_airports, by = c("origin" = "faa")) %>%
+  group_by(name, lat, lon) %>%
+  tally()
+  
+```
+
+```{r}
+library(ggplot2)
+
+cached_flights %>%
+  left_join(spark_airports, by = c("origin" = "faa")) %>%
+  group_by(name, lat, lon) %>%
+  tally() %>%
+  collect() %>%
+  ggplot() +
+    geom_point(aes(lon, lat, size = n, color = n), alpha = 0.3)
+```
+
+```{r}
+library(dbplot)
+
+
+cached_flights %>%
+  dbplot_line(month)
+```
+
+```{r}
+cached_flights %>%
+  dbplot_boxplot(month, depdelay)
+```
+
+```{r}
+cached_flights %>%
+  dbplot_histogram(distance, binwidth = 400)
+```
+
+
+```{r}
+model_data <- sdf_partition(
+  cached_flights,
+  training = 0.01, 
+  test = 0.09,
+  rest = 0.9
+  ) 
+
+training_data <- model_data$training %>%
+  compute("training")
+
+```
+
+```{r}
+spark_model <- 
+training_data %>%
+  ft_binarizer("depdelay", "delayed", 15) %>%
+  select( 
+    distance, delayed
+    ) %>%
+  ml_logistic_regression(delayed ~.)
+
+
+summary(spark_model)
+```
+
+```{r}
+cached_flights %>%
+  sample_n(5000) %>%
+  ft_binarizer("depdelay", "delayed", 15) %>%
+  sdf_predict(spark_model)  %>%
+  group_by(delayed, prediction) %>%
+  tally()
+```
+
+```{r}
+flights_pipeline <- ml_pipeline(sc) %>%
+  ft_binarizer("depdelay", "delayed", 15) %>%
+  ft_r_formula(
+    delayed ~ month + dayofmonth + crsdeptime + delayed  + distance
+  ) %>%
+  ml_logistic_regression()
+
+flights_pipeline
+```
+
+```{r}
+flights_pipelinemodel <- ml_fit(flights_pipeline, training_data)
+
+flights_pipelinemodel
+```
+
+
